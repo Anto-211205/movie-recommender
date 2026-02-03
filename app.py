@@ -1,206 +1,152 @@
 import streamlit as st
 import pickle
+import pandas as pd
 import requests
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
-# =========================================================
+# --------------------------------------------------
 # PAGE CONFIG
-# =========================================================
+# --------------------------------------------------
 st.set_page_config(
     page_title="Movie Recommendation System",
-    layout="wide"
+    page_icon="🎬",
+    layout="wide",
 )
 
-# =========================================================
-# PREMIUM DARK UI (SAFE)
-# =========================================================
-st.markdown("""
-<style>
-html, body, [class*="css"] {
-    background-color: #0b0f19;
-    color: #ffffff;
-    font-family: "Segoe UI", system-ui, sans-serif;
-}
-
-.block-container {
-    padding-top: 2.5rem;
-}
-
-#MainMenu, footer, header {visibility: hidden;}
-
-.main-title {
-    text-align: center;
-    font-size: 3.2rem;
-    font-weight: 800;
-    background: linear-gradient(90deg, #ff4b2b, #ff416c);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-}
-
-.subtitle {
-    text-align: center;
-    color: #9ca3af;
-    margin-bottom: 40px;
-}
-
-.stButton > button {
-    background: linear-gradient(90deg, #ff416c, #ff4b2b);
-    color: white;
-    border-radius: 14px;
-    height: 3.2em;
-    font-size: 18px;
-    font-weight: 700;
-}
-
-.movie-card {
-    background: rgba(255,255,255,0.05);
-    border-radius: 18px;
-    padding: 12px;
-    box-shadow: 0 12px 35px rgba(0,0,0,0.45);
-    transition: transform 0.25s ease;
-}
-
-.movie-card:hover {
-    transform: translateY(-6px);
-}
-
-.movie-title {
-    text-align: center;
-    margin-top: 10px;
-    font-weight: 600;
-}
-
-img {
-    border-radius: 14px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# =========================================================
+# --------------------------------------------------
 # LOAD DATA
-# =========================================================
-movies = pickle.load(open("movies.pkl", "rb"))
-similarity = pickle.load(open("similarity.pkl", "rb"))
+# --------------------------------------------------
+@st.cache_data
+def load_movies():
+    return pickle.load(open("movies.pkl", "rb"))
 
-# =========================================================
+movies = load_movies()
+
+# --------------------------------------------------
+# COMPUTE SIMILARITY (NO PKL FILE)
+# --------------------------------------------------
+@st.cache_resource
+def compute_similarity(movies_df):
+    cv = CountVectorizer(max_features=5000, stop_words="english")
+    vectors = cv.fit_transform(movies_df["tags"]).toarray()
+    similarity = cosine_similarity(vectors)
+    return similarity
+
+similarity = compute_similarity(movies)
+
+# --------------------------------------------------
 # TMDB CONFIG
-# =========================================================
-API_KEY = st.secrets["a7d76988410a01cac355ee5334451679"]
+# --------------------------------------------------
+API_KEY = st.secrets["TMDB_API_KEY"]
+POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
-
+# --------------------------------------------------
+# FETCH MOVIE DETAILS
+# --------------------------------------------------
+@st.cache_data
 def fetch_movie_details(movie_id):
-    """
-    Returns:
-    poster_url, genres, director, top_cast
-    """
     try:
-        movie_url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={API_KEY}"
+        details_url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={API_KEY}"
         credits_url = f"https://api.themoviedb.org/3/movie/{movie_id}/credits?api_key={API_KEY}"
+        providers_url = f"https://api.themoviedb.org/3/movie/{movie_id}/watch/providers?api_key={API_KEY}"
 
-        movie_data = requests.get(movie_url, timeout=5).json()
-        credits_data = requests.get(credits_url, timeout=5).json()
+        details = requests.get(details_url).json()
+        credits = requests.get(credits_url).json()
+        providers = requests.get(providers_url).json()
 
-        poster_path = movie_data.get("poster_path")
-        if not poster_path:
-            return None, None, None, None
+        poster = (
+            POSTER_BASE_URL + details["poster_path"]
+            if details.get("poster_path")
+            else None
+        )
 
-        poster_url = "https://image.tmdb.org/t/p/w500" + poster_path
-        genres = ", ".join([g["name"] for g in movie_data.get("genres", [])])
+        genres = ", ".join([g["name"] for g in details.get("genres", [])])
+        director = next(
+            (c["name"] for c in credits.get("crew", []) if c["job"] == "Director"),
+            "Unknown",
+        )
+        cast = ", ".join([c["name"] for c in credits.get("cast", [])[:5]])
 
-        director = "Unknown"
-        for crew in credits_data.get("crew", []):
-            if crew.get("job") == "Director":
-                director = crew.get("name")
-                break
+        watch_link = None
+        if "results" in providers and "IN" in providers["results"]:
+            watch_link = providers["results"]["IN"].get("link")
 
-        cast = ", ".join([c["name"] for c in credits_data.get("cast", [])[:3]])
+        return poster, genres, director, cast, watch_link
 
-        if not genres or not cast:
-            return None, None, None, None
+    except Exception:
+        return None, "N/A", "N/A", "N/A", None
 
-        return poster_url, genres, director, cast
+# --------------------------------------------------
+# RECOMMEND FUNCTION (FIXED COUNT)
+# --------------------------------------------------
+def recommend(movie_name, n=5):
+    index = movies[movies["title"] == movie_name].index[0]
+    distances = list(enumerate(similarity[index]))
+    distances = sorted(distances, key=lambda x: x[1], reverse=True)
 
-    except:
-        return None, None, None, None
+    recommendations = []
+    for i in distances[1 : n + 1]:
+        recommendations.append(movies.iloc[i[0]])
 
+    return recommendations
 
-def watch_link(title):
-    return "https://www.google.com/search?q=" + f"Watch {title} movie online".replace(" ", "+")
-
-# =========================================================
-# RECOMMENDER (ALWAYS RETURNS 5)
-# =========================================================
-def recommend(movie, n=5):
-    index = movies[movies["title"] == movie].index[0]
-
-    distances = sorted(
-        list(enumerate(similarity[index])),
-        reverse=True,
-        key=lambda x: x[1]
-    )
-
-    results = []
-    checked = 0
-    MAX_CHECKS = 60  # safety guard
-
-    for i, _ in distances[1:]:
-        if checked >= MAX_CHECKS:
-            break
-
-        row = movies.iloc[i]
-        checked += 1
-
-        poster, genres, director, cast = fetch_movie_details(row.movie_id)
-
-        if poster:
-            results.append({
-                "title": row.title,
-                "poster": poster,
-                "genres": genres,
-                "director": director,
-                "cast": cast,
-                "watch": watch_link(row.title)
-            })
-
-        if len(results) == n:
-            break
-
-    return results
-
-# =========================================================
-# UI
-# =========================================================
-st.markdown("<div class='main-title'>🎬 Movie Recommendation System</div>", unsafe_allow_html=True)
-st.markdown("<div class='subtitle'>Discover • Explore • Watch</div>", unsafe_allow_html=True)
-
-selected_movie = st.selectbox(
-    "🎥 Select a movie you like",
-    movies["title"].values
+# --------------------------------------------------
+# UI STYLING
+# --------------------------------------------------
+st.markdown(
+    """
+    <style>
+    body {
+        background-color: #0f0f0f;
+        color: white;
+    }
+    .movie-card {
+        background-color: #1c1c1c;
+        padding: 10px;
+        border-radius: 12px;
+        transition: transform 0.3s;
+    }
+    .movie-card:hover {
+        transform: scale(1.05);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
+
+# --------------------------------------------------
+# APP UI
+# --------------------------------------------------
+st.title("🎬 Movie Recommendation System")
+st.caption("Netflix-style recommendations with rich details")
+
+selected_movie = st.selectbox("Choose a movie", movies["title"].values)
 
 if st.button("🚀 Recommend Movies"):
-    with st.spinner("Finding the best movies for you..."):
-        recommendations = recommend(selected_movie)
+    recommendations = recommend(selected_movie, n=5)
 
     st.subheader("🔥 Recommended for you")
 
-    cols = st.columns(len(recommendations))
+    cols = st.columns(5)
+
     for col, movie in zip(cols, recommendations):
+        poster, genres, director, cast, watch_link = fetch_movie_details(
+            movie.movie_id
+        )
+
         with col:
-            st.markdown("<div class='movie-card'>", unsafe_allow_html=True)
+            st.markdown('<div class="movie-card">', unsafe_allow_html=True)
 
-            # Clickable poster
-            st.markdown(f"""
-            <a href="{movie['watch']}" target="_blank">
-                <img src="{movie['poster']}" style="width:100%;">
-            </a>
-            """, unsafe_allow_html=True)
+            if poster:
+                st.image(poster, use_container_width=True)
 
-            st.markdown(f"<div class='movie-title'>{movie['title']}</div>", unsafe_allow_html=True)
+            st.markdown(f"**{movie.title}**")
+            st.caption(f"🎭 {genres}")
+            st.caption(f"🎬 Director: {director}")
+            st.caption(f"👥 Cast: {cast}")
 
-            with st.expander("ℹ️ More info"):
-                st.write(f"🎬 **Director:** {movie['director']}")
-                st.write(f"🎭 **Top Cast:** {movie['cast']}")
-                st.write(f"🏷️ **Genres:** {movie['genres']}")
-                st.markdown(f"[▶️ **Where to watch**]({movie['watch']})")
+            if watch_link:
+                st.markdown(f"[▶ Watch here]({watch_link})")
 
             st.markdown("</div>", unsafe_allow_html=True)
