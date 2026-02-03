@@ -38,7 +38,8 @@ similarity = compute_similarity(movies)
 # --------------------------------------------------
 # TMDB CONFIG
 # --------------------------------------------------
-API_KEY = st.secrets["a7d76988410a01cac355ee5334451679"]
+API_KEY = st.secrets["TMDB_API_KEY"]
+
 POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
 # --------------------------------------------------
