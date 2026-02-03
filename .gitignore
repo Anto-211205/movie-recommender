@@ -1,0 +1,12 @@
+# Virtual environment
+venv/
+
+# Large ML artifacts
+similarity.pkl
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Secrets
+.env
